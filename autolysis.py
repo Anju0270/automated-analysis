@@ -1,33 +1,51 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "requests",
+#   "pandas",
+#   "seaborn",
+#   "matplotlib",
+#   "pillow",
+# ]
+# ///
+
 import os
-import openai
+import requests
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from PIL import Image
 
 # Load the AIPROXY_TOKEN from environment variable
-openai.api_key = os.getenv("AIPROXY_TOKEN")
+api_key = os.getenv("AIPROXY_TOKEN")
 
 # Function to load and analyze the dataset
 def load_and_analyze_data(file_path):
-    data = pd.read_csv(file_path)
+    try:
+        # Attempt to read the file with UTF-8 encoding
+        data = pd.read_csv(file_path, encoding='utf-8')
+    except UnicodeDecodeError:
+        # If UTF-8 fails, try with a fallback encoding
+        data = pd.read_csv(file_path, encoding='latin1')
     
     # Basic Analysis
     summary = data.describe(include='all')
     missing_values = data.isnull().sum()
     column_types = data.dtypes
+    data_info = data.info()
 
     # Generate basic insights
     insights = {
         "summary": summary,
         "missing_values": missing_values,
         "column_types": column_types,
+        "data_info": data_info,
     }
 
     return data, insights
 
 # Function to create visualizations and save as PNG
-def create_visualizations(data, output_dir):
+def create_visualizations(data, labels=None):
     images = []
     
     # Correlation Heatmap
@@ -37,12 +55,12 @@ def create_visualizations(data, output_dir):
         plt.figure(figsize=(8, 6))
         sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm")
         plt.title("Correlation Heatmap")
-        heatmap_path = os.path.join(output_dir, "correlation_heatmap.png")
+        heatmap_path = "correlation_heatmap.png"
         plt.savefig(heatmap_path, dpi=100, bbox_inches='tight', pad_inches=0.1, transparent=True)
         
         # Resize to 512x512 px
         with Image.open(heatmap_path) as img:
-            img = img.resize((512, 512))  # Resize to 512x512
+            img = img.resize((512, 512))
             img.save(heatmap_path)
         plt.close()
         images.append(heatmap_path)
@@ -52,7 +70,7 @@ def create_visualizations(data, output_dir):
         plt.figure(figsize=(6, 4))
         sns.histplot(numeric_data[col], kde=True, bins=30)
         plt.title(f"Distribution of {col}")
-        hist_path = os.path.join(output_dir, f"{col}_distribution.png")
+        hist_path = f"{col}_distribution.png"
         plt.savefig(hist_path, dpi=100, bbox_inches='tight', pad_inches=0.1, transparent=True)
         
         # Resize image to 512x512 px
@@ -62,10 +80,25 @@ def create_visualizations(data, output_dir):
         plt.close()
         images.append(hist_path)
 
+    # Scatter Plot (if labels available)
+    if labels is not None and numeric_data.shape[1] >= 2:
+        plt.figure(figsize=(8, 6))
+        plt.scatter(numeric_data.iloc[:, 0], numeric_data.iloc[:, 1], c=labels, cmap="viridis")
+        plt.title("Clustering Scatter Plot")
+        scatter_path = "clustering_scatter.png"
+        plt.savefig(scatter_path, dpi=100, bbox_inches='tight', pad_inches=0.1, transparent=True)
+        
+        # Resize image to 512x512 px
+        with Image.open(scatter_path) as img:
+            img = img.resize((512, 512))
+            img.save(scatter_path)
+        plt.close()
+        images.append(scatter_path)
+
     return images
 
-# Function to generate LLM-based narrative
-def generate_narrative(insights, images, output_dir):
+# Function to generate LLM-based narrative using the custom endpoint
+def generate_narrative(insights, images):
     prompt = f"""
     Dataset Analysis Report:
     Dataset Summary: {insights['summary']}
@@ -80,18 +113,26 @@ def generate_narrative(insights, images, output_dir):
     5. Embed relevant visualizations that help illustrate the insights.
     """
 
-    # Request narrative from the LLM
-    response = openai.Completion.create(
-        model="gpt-4.0-mini", 
-        prompt=prompt, 
-        max_tokens=1500
+    # Send the request to the custom API
+    response = requests.post(
+        "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": prompt}
+            ]
+        }
     )
-
-    narrative = response.choices[0].text.strip()
+    
+    if response.status_code == 200:
+        narrative = response.json()["choices"][0]["message"]["content"].strip()
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
+        return None
 
     # Construct README.md with narrative and images
-    readme_path = os.path.join(output_dir, "README.md")
-    with open(readme_path, "w") as file:
+    with open("README.md", "w") as file:
         file.write("# Automated Data Analysis Report\n")
         file.write("## Narrative\n")
         file.write(narrative)
@@ -106,19 +147,13 @@ def main(file_path):
     # Step 1: Load and Analyze the Data
     data, insights = load_and_analyze_data(file_path)
     
-    # Extract directory name from the input CSV file (without extension)
-    output_dir = os.path.splitext(os.path.basename(file_path))[0]
-
-    # Step 2: Create the directory (if not exists)
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Step 3: Create Visualizations and save them as PNGs in the output directory
-    images = create_visualizations(data, output_dir=output_dir)
+    # Step 2: Create Visualizations and save them as PNGs
+    images = create_visualizations(data)
     
-    # Step 4: Generate and save the Narrative in README.md
-    generate_narrative(insights, images, output_dir=output_dir)
+    # Step 3: Generate and save the Narrative in README.md
+    generate_narrative(insights, images)
 
-    print(f"Analysis complete. Results saved in {output_dir}/README.md and images in {output_dir}/.")
+    print(f"Analysis complete. Results saved in README.md and images {', '.join(images)}.")
 
 # Entry point for the script
 if __name__ == "__main__":
